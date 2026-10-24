@@ -1,0 +1,34 @@
+---
+description: CloudNova Track B — specs drive all pipeline and query changes
+alwaysApply: true
+---
+
+# CloudNova FDE Take-Home (Track B)
+
+## Source of truth
+
+- Business rules: `data/BUSINESS_CONTEXT.md`
+- Implementation contracts: `specs/cleaned_schema.md`, `specs/api_cli.md`, `specs/eval_spec.md`
+- If code and specs disagree, **fix the spec first**, then update code.
+
+## Do
+
+- Keep the demo runnable with `python -m app` after `pip install -r requirements.txt`
+- Prefer deterministic template SQL for stakeholder questions; LLM path is optional
+- Never commit `.env`, API keys, or DuckDB binaries if large — `data/processed/` may be gitignored rebuildable artifact
+- Add/adjust eval cases when changing revenue, MRR, dedup, or FX logic
+- Record material AI overrides and judgment calls in `docs/ai-session-notes.md`
+
+## Don't
+
+- Invent alternate list prices, FX rates, or revenue definitions
+- Use RAG/embeddings for this track
+- Gold-plate UI, cloud deploy, or extra frameworks beyond pandas/duckdb/openai client
+- Skip showing generated SQL in ask responses
+
+## Change discipline
+
+1. Update the relevant file under `/specs`
+2. Implement in `app/`
+3. Update `evals/cases.yaml` expectations if numbers change for legitimate reasons
+4. Note why in `docs/ai-session-notes.md` if it was an AI vs human judgment call
