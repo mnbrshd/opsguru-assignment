@@ -2,13 +2,26 @@
 
 Finance handed us a dirty invoice export. This repo turns it into a **cleaned DuckDB model** and a **plain-English ask CLI** that shows the SQL it ran — so answers about revenue, MRR, refunds, and churn are inspectable.
 
-**Track:** Spec-driven data pipeline + NL→SQL (not RAG).
+**Track:** Spec-driven data pipeline + NL→SQL (not RAG).  
+**Repo:** [github.com/mnbrshd/opsguru-assignment](https://github.com/mnbrshd/opsguru-assignment) · CI runs `python -m evals.run_eval` on every push to `main`.
+
+### Reviewer map (3 minutes)
+
+| Look here | Why |
+|-----------|-----|
+| [`/specs`](specs/) | Written **before** code — schema, CLI, eval contracts |
+| [`docs/architecture.md`](docs/architecture.md) | Raw CSV → clean → DuckDB → ask / evals |
+| [`.cursor/rules/`](.cursor/rules/) + [`docs/ai-session-notes.md`](docs/ai-session-notes.md) | How Cursor was steered |
+| [`evals/`](evals/) | Pass/fail harness + one intentional XFAIL |
 
 ## How to run
+
+Needs **Python 3.11+**. First ask rebuilds DuckDB from the CSV (~few seconds).
 
 ```bash
 python -m venv .venv
 # Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 
 # One demo command (builds DB if needed, answers a stakeholder question)
@@ -21,16 +34,16 @@ python -m app
 python -m evals.run_eval
 ```
 
-Optional LLM NL→SQL for off-template questions: copy `.env.example` → `.env` and set `OPENAI_API_KEY`.
+You should see **6 PASS + 1 XFAIL** from the eval harness (the XFAIL is intentional — see limits below).
+
+Optional LLM NL→SQL for off-template questions: copy `.env.example` → `.env` and set `OPENAI_API_KEY`. Core demo and CI do **not** need a key.
 
 ## What it does
 
 1. Cleans `data/cloudnova_invoices.csv` (normalize plan/status/billing, parse messy amounts & dates, FX→USD, MRR, dedupe).
-2. Loads `data/processed/invoices.duckdb`.
+2. Loads `data/processed/invoices.duckdb` (gitignored; rebuilt locally / in CI).
 3. Maps natural-language questions to SQL (deterministic templates for the briefing’s six questions; optional OpenAI fallback).
 4. Returns **answer + SQL + result rows**.
-
-Architecture: [docs/architecture.md](docs/architecture.md).
 
 ## Spec (wrote this first)
 
@@ -39,8 +52,6 @@ Architecture: [docs/architecture.md](docs/architecture.md).
 | [specs/cleaned_schema.md](specs/cleaned_schema.md) | Canonical schema, maps, FX, MRR, dedup, dates |
 | [specs/api_cli.md](specs/api_cli.md) | CLI contract & response shape |
 | [specs/eval_spec.md](specs/eval_spec.md) | Eval harness rules |
-
-AI steering artifacts: [`.cursor/rules/`](.cursor/rules/), [docs/ai-session-notes.md](docs/ai-session-notes.md).
 
 ## Design decisions
 
@@ -60,7 +71,7 @@ AI steering artifacts: [`.cursor/rules/`](.cursor/rules/), [docs/ai-session-note
 
 ## Another day
 
-- Better intent routing; parser property tests; near-dup lineage table; thin `POST /ask` API; public repo / reviewer invites for submission.
+- Better intent routing; parser property tests; near-dup lineage table; thin `POST /ask` API.
 
 ## License / data
 
