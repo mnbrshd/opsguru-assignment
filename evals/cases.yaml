@@ -1,0 +1,147 @@
+# Eval cases — SQL is authoritative for CI (no LLM).
+# Expected values locked from pipeline run on data/cloudnova_invoices.csv
+
+- id: revenue_2024_recognized
+  question: "What was our total recognized revenue in USD for paid invoices in 2024?"
+  sql: |
+    SELECT ROUND(COALESCE(SUM(amount_usd), 0), 2) AS total_revenue_usd
+    FROM invoices
+    WHERE is_recognized_revenue
+      AND invoice_date >= DATE '2024-01-01'
+      AND invoice_date < DATE '2025-01-01'
+  expect:
+    type: scalar_float
+    column: total_revenue_usd
+    value: 26316416.03
+    tolerance_abs: 1.0
+  expected_fail: false
+  notes: "Recognized = paid + refunded (negative nets)."
+
+- id: region_highest_avg_mrr
+  question: "Which region has the highest average MRR per account?"
+  sql: |
+    WITH account_mrr AS (
+      SELECT region, account_id, AVG(mrr_usd) AS account_mrr
+      FROM invoices
+      WHERE mrr_usd IS NOT NULL AND region IS NOT NULL
+      GROUP BY region, account_id
+    )
+    SELECT region, ROUND(AVG(account_mrr), 2) AS avg_mrr_per_account
+    FROM account_mrr
+    GROUP BY region
+    ORDER BY avg_mrr_per_account DESC
+    LIMIT 1
+  expect:
+    type: scalar_str
+    column: region
+    value: APAC
+  expected_fail: false
+
+- id: refunds_total
+  question: "How much have we given back in refunds?"
+  sql: |
+    SELECT ROUND(COALESCE(SUM(ABS(amount_usd)), 0), 2) AS refunds_usd
+    FROM invoices
+    WHERE status = 'refunded'
+  expect:
+    type: scalar_float
+    column: refunds_usd
+    value: 7921679.64
+    tolerance_abs: 1.0
+  expected_fail: false
+
+- id: churn_enterprise_vs_starter
+  question: "What's the churn rate among Enterprise accounts vs Starter?"
+  sql: |
+    WITH accounts AS (
+      SELECT account_id, plan, MAX(CASE WHEN churned THEN 1 ELSE 0 END) AS is_churned
+      FROM invoices
+      WHERE plan IN ('enterprise', 'starter')
+      GROUP BY account_id, plan
+    )
+    SELECT
+      plan,
+      ROUND(100.0 * SUM(is_churned) / NULLIF(COUNT(*), 0), 2) AS churn_rate_pct
+    FROM accounts
+    GROUP BY plan
+    ORDER BY plan
+  expect:
+    type: keyed_floats
+    key_column: plan
+    value_column: churn_rate_pct
+    values:
+      enterprise: 22.22
+      starter: 20.67
+    tolerance_abs: 0.05
+  expected_fail: false
+  notes: "Account-level churn; an account on both plans (if any) counted in each."
+
+- id: top5_accounts_revenue
+  question: "List the top 5 accounts by revenue, and flag any with CSAT ≤ 2."
+  sql: |
+    WITH rev AS (
+      SELECT
+        account_id,
+        ANY_VALUE(account_name) AS account_name,
+        ROUND(SUM(amount_usd), 2) AS revenue_usd,
+        MIN(csat_score) AS csat_score
+      FROM invoices
+      WHERE is_recognized_revenue
+      GROUP BY account_id
+    )
+    SELECT
+      account_id,
+      account_name,
+      revenue_usd,
+      csat_score,
+      (csat_score IS NOT NULL AND csat_score <= 2) AS low_csat_flag
+    FROM rev
+    ORDER BY revenue_usd DESC
+    LIMIT 5
+  expect:
+    type: top_n_accounts
+    column: account_id
+    values:
+      - ACC-7509
+      - ACC-1420
+      - ACC-9946
+      - ACC-1196
+      - ACC-2258
+    low_csat_account: ACC-1196
+  expected_fail: false
+
+- id: pending_failed_exposure
+  question: "How many invoices are stuck in pending/failed and what's the exposed $?"
+  sql: |
+    SELECT
+      COUNT(*) AS invoice_count,
+      ROUND(COALESCE(SUM(amount_usd), 0), 2) AS exposed_usd
+    FROM invoices
+    WHERE status IN ('pending', 'failed')
+  expect:
+    type: multi_scalar
+    values:
+      invoice_count: 894
+      exposed_usd: 25876745.97
+    tolerance_abs: 1.0
+  expected_fail: false
+
+# Expected fail: naive paid-only SQL does NOT match correct recognized revenue
+# (refunds must net). Harness should XFAIL.
+- id: naive_paid_only_ignores_refunds
+  question: "What was our total recognized revenue in USD for paid invoices in 2024?"
+  sql: |
+    SELECT ROUND(COALESCE(SUM(amount_usd), 0), 2) AS total_revenue_usd
+    FROM invoices
+    WHERE status = 'paid'
+      AND invoice_date >= DATE '2024-01-01'
+      AND invoice_date < DATE '2025-01-01'
+  expect:
+    type: scalar_float
+    column: total_revenue_usd
+    value: 26316416.03
+    tolerance_abs: 1.0
+  expected_fail: true
+  notes: >
+    Intentionally wrong SQL (status=paid only). Omitting refund nets overstates
+    2024 revenue (~28.1M vs ~26.3M). We expect this assertion to FAIL (XFAIL).
