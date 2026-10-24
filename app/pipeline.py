@@ -137,17 +137,22 @@ def parse_amount(raw: Any) -> float | None:
         return None
 
 
-def parse_date(raw: Any, warnings: list[str] | None = None) -> pd.Timestamp | None:
-    """Parse mixed date formats; ambiguous both<=12 prefers day-first."""
+def parse_date_pair(raw: Any) -> tuple[pd.Timestamp | None, pd.Timestamp | None, bool]:
+    """Return (day_first_canonical, month_first_alt, ambiguous).
+
+    Canonical invoice_date uses day-first for ambiguous DD-MM/MM-DD forms.
+    month_first_alt equals canonical when unambiguous.
+    """
     if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-        return None
+        return None, None, False
     s = str(raw).strip()
     if not s:
-        return None
+        return None, None, False
 
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d", "%b %d %Y", "%B %d %Y", "%d/%m/%Y"):
         try:
-            return pd.to_datetime(s, format=fmt)
+            ts = pd.to_datetime(s, format=fmt)
+            return ts, ts, False
         except (ValueError, TypeError):
             pass
 
@@ -156,29 +161,45 @@ def parse_date(raw: Any, warnings: list[str] | None = None) -> pd.Timestamp | No
         a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if a > 12 and b <= 12:
             try:
-                return pd.Timestamp(year=y, month=b, day=a)
+                ts = pd.Timestamp(year=y, month=b, day=a)
+                return ts, ts, False
             except ValueError:
-                return None
+                return None, None, False
         if b > 12 and a <= 12:
             try:
-                return pd.Timestamp(year=y, month=a, day=b)
+                ts = pd.Timestamp(year=y, month=a, day=b)
+                return ts, ts, False
             except ValueError:
-                return None
-        # Ambiguous: prefer day-first per spec
-        if warnings is not None:
-            warnings.append(f"ambiguous_date_day_first:{s}")
+                return None, None, False
+        # Ambiguous: day-first canonical, month-first alternate
         try:
-            return pd.Timestamp(year=y, month=b, day=a)
+            day_first = pd.Timestamp(year=y, month=b, day=a)
         except ValueError:
-            return None
+            day_first = None
+        try:
+            month_first = pd.Timestamp(year=y, month=a, day=b)
+        except ValueError:
+            month_first = None
+        return day_first, month_first, True
 
     try:
-        return pd.to_datetime(s, dayfirst=True)
+        ts = pd.to_datetime(s, dayfirst=True)
+        return ts, ts, False
     except (ValueError, TypeError):
-        return None
+        return None, None, False
 
 
-def clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+def parse_date(raw: Any, warnings: list[str] | None = None) -> pd.Timestamp | None:
+    """Back-compat helper: canonical day-first date."""
+    day_first, _month_first, ambiguous = parse_date_pair(raw)
+    if ambiguous and warnings is not None and raw is not None:
+        warnings.append(f"ambiguous_date_day_first:{raw}")
+    return day_first
+
+
+def clean_dataframe(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     warnings: list[str] = []
     stats: dict[str, Any] = {"input_rows": len(df)}
 
@@ -214,11 +235,23 @@ def clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
         pd.to_numeric(work["support_tickets"], errors="coerce").fillna(0).astype(int)
     )
 
-    amb_warn: list[str] = []
-    work["invoice_date"] = work["invoice_date"].map(lambda v: parse_date(v, amb_warn))
-    work["signup_date"] = work["signup_date"].map(lambda v: parse_date(v, amb_warn))
-    stats["ambiguous_dates"] = len(amb_warn)
-    warnings.extend(amb_warn[:20])
+    raw_invoice_dates = work["invoice_date"].copy()
+    inv_parsed = raw_invoice_dates.map(parse_date_pair)
+    work["invoice_date"] = inv_parsed.map(lambda t: t[0])
+    work["invoice_date_month_first"] = inv_parsed.map(lambda t: t[1])
+    work["invoice_date_ambiguous"] = inv_parsed.map(lambda t: t[2])
+
+    signup_parsed = work["signup_date"].map(parse_date_pair)
+    work["signup_date"] = signup_parsed.map(lambda t: t[0])
+
+    stats["ambiguous_invoice_dates"] = int(work["invoice_date_ambiguous"].sum())
+    warnings.extend(
+        [
+            f"ambiguous_date_day_first:{v}"
+            for v, amb in zip(raw_invoice_dates, work["invoice_date_ambiguous"], strict=True)
+            if amb
+        ][:20]
+    )
 
     work["amount_usd"] = work.apply(
         lambda r: None
@@ -244,10 +277,40 @@ def clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
         ascending=[True, False, False],
         na_position="last",
     )
-    work = work.drop_duplicates(subset=["invoice_id"], keep="first")
-    work = work.drop(columns=["_status_rank"])
+    survivors = work.drop_duplicates(subset=["invoice_id"], keep="first")
+    dropped = work.loc[~work.index.isin(survivors.index)].copy()
+    if len(dropped):
+        survivor_status = survivors.set_index("invoice_id")["status"]
+        dropped["survivor_status"] = dropped["invoice_id"].map(survivor_status)
+        dropped["drop_reason"] = "lower_status_priority_or_older_date"
+        dropped_out = dropped[
+            [
+                "invoice_id",
+                "account_id",
+                "status",
+                "amount_usd",
+                "invoice_date",
+                "survivor_status",
+                "drop_reason",
+            ]
+        ].reset_index(drop=True)
+    else:
+        dropped_out = pd.DataFrame(
+            columns=[
+                "invoice_id",
+                "account_id",
+                "status",
+                "amount_usd",
+                "invoice_date",
+                "survivor_status",
+                "drop_reason",
+            ]
+        )
+
+    work = survivors.drop(columns=["_status_rank"])
 
     stats["output_rows"] = len(work)
+    stats["near_dups_dropped"] = len(dropped_out)
     stats["unknown_plan"] = int((work["plan"] == "unknown").sum())
     stats["unknown_status"] = int((work["status"] == "unknown").sum())
     stats["warnings_sample"] = warnings[:10]
@@ -270,6 +333,8 @@ def clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
         "payment_method",
         "signup_date",
         "invoice_date",
+        "invoice_date_month_first",
+        "invoice_date_ambiguous",
         "churned",
         "csat_score",
         "support_tickets",
@@ -279,14 +344,18 @@ def clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
         "raw_plan",
         "raw_status",
     ]
-    return work[cols].reset_index(drop=True), stats
+    return work[cols].reset_index(drop=True), dropped_out, stats
 
 
 def load_raw_csv(csv_path: Path) -> pd.DataFrame:
     return pd.read_csv(csv_path, dtype=str, keep_default_na=False, na_values=[""])
 
 
-def write_duckdb(df: pd.DataFrame, db_path: Path) -> None:
+def write_duckdb(
+    df: pd.DataFrame,
+    db_path: Path,
+    dropped: pd.DataFrame | None = None,
+) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
@@ -296,6 +365,9 @@ def write_duckdb(df: pd.DataFrame, db_path: Path) -> None:
         con.execute(schema)
         con.register("_clean", df)
         con.execute("INSERT INTO invoices SELECT * FROM _clean")
+        if dropped is not None and len(dropped):
+            con.register("_dropped", dropped)
+            con.execute("INSERT INTO invoice_dedup_dropped SELECT * FROM _dropped")
     finally:
         con.close()
 
@@ -307,8 +379,8 @@ def run_pipeline(
     csv_path = Path(csv_path)
     db_path = Path(db_path)
     raw = load_raw_csv(csv_path)
-    cleaned, stats = clean_dataframe(raw)
-    write_duckdb(cleaned, db_path)
+    cleaned, dropped, stats = clean_dataframe(raw)
+    write_duckdb(cleaned, db_path, dropped)
     stats["db_path"] = str(db_path)
     stats["csv_path"] = str(csv_path)
     return stats

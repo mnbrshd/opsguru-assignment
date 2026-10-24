@@ -39,9 +39,16 @@ It is curated — not a raw transcript dump.
 - No gold-plated UI or cloud deploy
 - Do not silently change list prices / FX / MRR definition
 
+## Follow-up hardening (post-first-pass)
+
+Addressed documented limits without gold-plating:
+- Scored synonym template matcher (offline paraphrases)
+- `invoice_date_month_first` + revenue `date_sensitivity` warnings
+- `invoice_dedup_dropped` lineage table
+- Churn = one account / latest-plan grain
+
 ## Follow-ups for another day
 
-- Stronger NL router (embeddings over template regex)
+- Embedding/LLM router as default
 - Property tests on amount/date parsers
-- Explicit lineage table for dropped near-dupes
-- Make repo public / invite reviewers for submission
+- Thin `POST /ask` API

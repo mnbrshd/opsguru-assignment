@@ -1,4 +1,4 @@
-"""NL → SQL over cleaned invoices (templates + optional LLM)."""
+"""NL → SQL over cleaned invoices (scored templates + optional LLM)."""
 
 from __future__ import annotations
 
@@ -12,27 +12,31 @@ import duckdb
 
 DEFAULT_DB = Path("data/processed/invoices.duckdb")
 
-# Stakeholder-aligned deterministic SQL (specs/eval_spec.md)
-TEMPLATES: list[tuple[str, re.Pattern[str], str, str]] = [
-    (
-        "revenue_2024",
-        re.compile(
-            r"(total|recognized).*(revenue)|revenue.*(2024|paid)",
-            re.I,
-        ),
-        """
+# Stakeholder SQL + keyword weights for paraphrase-tolerant matching
+TEMPLATES: list[dict[str, Any]] = [
+    {
+        "name": "revenue_2024",
+        "sql": """
 SELECT ROUND(COALESCE(SUM(amount_usd), 0), 2) AS total_revenue_usd
 FROM invoices
 WHERE is_recognized_revenue
   AND invoice_date >= DATE '2024-01-01'
   AND invoice_date < DATE '2025-01-01'
 """.strip(),
-        "Total recognized revenue (paid + refund nets) for invoices dated in 2024.",
-    ),
-    (
-        "region_avg_mrr",
-        re.compile(r"(region).*(mrr|highest)|highest.*(average|avg).*mrr|avg.*mrr.*region", re.I),
-        """
+        "blurb": "Total recognized revenue (paid + refund nets) for invoices dated in 2024 (day-first dates).",
+        "positive": [
+            ("recognized revenue", 5),
+            ("total revenue", 4),
+            ("revenue", 3),
+            ("2024", 3),
+            ("how much did we make", 4),
+            ("bookings", 2),
+        ],
+        "negative": [("refund", 4), ("churn", 4), ("mrr", 3), ("top 5", 4), ("pending", 3), ("failed", 3)],
+    },
+    {
+        "name": "region_avg_mrr",
+        "sql": """
 WITH account_mrr AS (
   SELECT region, account_id, AVG(mrr_usd) AS account_mrr
   FROM invoices
@@ -45,43 +49,58 @@ GROUP BY region
 ORDER BY avg_mrr_per_account DESC
 LIMIT 1
 """.strip(),
-        "Region with the highest average MRR per account.",
-    ),
-    (
-        "refunds",
-        re.compile(r"refund", re.I),
-        """
+        "blurb": "Region with the highest average MRR per account.",
+        "positive": [
+            ("mrr", 4),
+            ("region", 3),
+            ("highest average", 3),
+            ("avg mrr", 4),
+            ("which region", 3),
+        ],
+        "negative": [("revenue", 2), ("refund", 3), ("churn", 3), ("pending", 2)],
+    },
+    {
+        "name": "refunds",
+        "sql": """
 SELECT ROUND(COALESCE(SUM(ABS(amount_usd)), 0), 2) AS refunds_usd
 FROM invoices
 WHERE status = 'refunded'
 """.strip(),
-        "Total absolute USD given back in refunds.",
-    ),
-    (
-        "churn_by_plan",
-        re.compile(r"churn", re.I),
-        """
-WITH accounts AS (
-  SELECT account_id, plan, MAX(CASE WHEN churned THEN 1 ELSE 0 END) AS is_churned
+        "blurb": "Total absolute USD given back in refunds.",
+        "positive": [("refund", 5), ("given back", 3), ("chargeback", 4), ("money back", 3)],
+        "negative": [("recognized revenue", 3), ("churn", 2), ("pending", 2)],
+    },
+    {
+        "name": "churn_by_plan",
+        "sql": """
+WITH latest AS (
+  SELECT
+    account_id,
+    plan,
+    churned,
+    ROW_NUMBER() OVER (
+      PARTITION BY account_id
+      ORDER BY invoice_date DESC NULLS LAST, invoice_id
+    ) AS rn
   FROM invoices
-  WHERE plan IN ('enterprise', 'starter')
-  GROUP BY account_id, plan
 )
 SELECT
   plan,
   COUNT(*) AS accounts,
-  SUM(is_churned) AS churned_accounts,
-  ROUND(100.0 * SUM(is_churned) / NULLIF(COUNT(*), 0), 2) AS churn_rate_pct
-FROM accounts
+  SUM(CASE WHEN churned THEN 1 ELSE 0 END) AS churned_accounts,
+  ROUND(100.0 * SUM(CASE WHEN churned THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) AS churn_rate_pct
+FROM latest
+WHERE rn = 1 AND plan IN ('enterprise', 'starter')
 GROUP BY plan
 ORDER BY plan
 """.strip(),
-        "Churn rate among Enterprise vs Starter accounts (account-level).",
-    ),
-    (
-        "top5_revenue_csat",
-        re.compile(r"top\s*5|top five|highest.*(account|revenue)", re.I),
-        """
+        "blurb": "Churn rate among Enterprise vs Starter (one row per account; plan = latest invoice).",
+        "positive": [("churn", 5), ("enterprise", 2), ("starter", 2), ("churn rate", 5)],
+        "negative": [("revenue", 2), ("refund", 2), ("mrr", 2)],
+    },
+    {
+        "name": "top5_revenue_csat",
+        "sql": """
 WITH rev AS (
   SELECT
     account_id,
@@ -102,21 +121,38 @@ FROM rev
 ORDER BY revenue_usd DESC
 LIMIT 5
 """.strip(),
-        "Top 5 accounts by recognized revenue, with CSAT ≤ 2 flag.",
-    ),
-    (
-        "pending_failed_exposure",
-        re.compile(r"pending|failed|stuck|exposed", re.I),
-        """
+        "blurb": "Top 5 accounts by recognized revenue, with CSAT ≤ 2 flag.",
+        "positive": [
+            ("top 5", 5),
+            ("top five", 5),
+            ("highest revenue", 4),
+            ("csat", 3),
+            ("accounts by revenue", 4),
+        ],
+        "negative": [("region", 2), ("churn", 3), ("refund", 2)],
+    },
+    {
+        "name": "pending_failed_exposure",
+        "sql": """
 SELECT
   COUNT(*) AS invoice_count,
   ROUND(COALESCE(SUM(amount_usd), 0), 2) AS exposed_usd
 FROM invoices
 WHERE status IN ('pending', 'failed')
 """.strip(),
-        "Count and exposed USD of pending/failed invoices.",
-    ),
+        "blurb": "Count and exposed USD of pending/failed invoices.",
+        "positive": [
+            ("pending", 4),
+            ("failed", 4),
+            ("stuck", 3),
+            ("exposed", 3),
+            ("at risk", 3),
+        ],
+        "negative": [("refund", 2), ("churn", 2), ("mrr", 2)],
+    },
 ]
+
+MIN_TEMPLATE_SCORE = 3
 
 
 @dataclass
@@ -139,13 +175,41 @@ class AskResult:
         }
 
 
-def _match_template(question: str) -> tuple[str, str, str] | None:
-    # Prefer more specific templates: score by pattern specificity order as listed,
-    # but require refund before revenue if both somehow match — order in TEMPLATES matters.
-    for name, pattern, sql, blurb in TEMPLATES:
-        if pattern.search(question):
-            return name, sql, blurb
-    return None
+def _score_template(question: str, tmpl: dict[str, Any]) -> int:
+    q = question.casefold()
+    score = 0
+    for phrase, weight in tmpl["positive"]:
+        if phrase.casefold() in q:
+            score += weight
+    for phrase, weight in tmpl["negative"]:
+        if phrase.casefold() in q:
+            score -= weight
+    return score
+
+
+def _match_template(question: str) -> tuple[str, str, str, int] | None:
+    scored = [(_score_template(question, t), t) for t in TEMPLATES]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best = scored[0]
+    if best_score < MIN_TEMPLATE_SCORE:
+        return None
+    # Require clear winner unless only one candidate clears the bar
+    second = scored[1][0] if len(scored) > 1 else -999
+    if best_score == second:
+        # tie-break: prefer more specific names by fixed priority
+        priority = {
+            "refunds": 6,
+            "churn_by_plan": 5,
+            "pending_failed_exposure": 4,
+            "top5_revenue_csat": 3,
+            "region_avg_mrr": 2,
+            "revenue_2024": 1,
+        }
+        best = max(
+            (t for s, t in scored if s == best_score),
+            key=lambda t: priority.get(t["name"], 0),
+        )
+    return best["name"], best["sql"], best["blurb"], best_score
 
 
 def _is_safe_select(sql: str) -> bool:
@@ -174,7 +238,7 @@ def _is_safe_select(sql: str) -> bool:
 def _format_answer(blurb: str, rows: list[dict[str, Any]]) -> str:
     if not rows:
         return f"{blurb} No rows returned."
-    if len(rows) == 1 and len(rows[0]) <= 3:
+    if len(rows) == 1 and len(rows[0]) <= 4:
         parts = [f"{k}={v}" for k, v in rows[0].items()]
         return f"{blurb} " + ", ".join(parts)
     return f"{blurb} Returned {len(rows)} row(s); see `rows` / SQL."
@@ -187,11 +251,59 @@ def execute_sql(db_path: Path, sql: str, limit_display: int = 50) -> list[dict[s
         cols = [c[0] for c in cur.description]
         raw = cur.fetchall()
         rows = [dict(zip(cols, r)) for r in raw]
-        # stringify dates etc.
         out: list[dict[str, Any]] = []
         for row in rows[:limit_display]:
             out.append({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()})
-        return out if len(rows) <= limit_display else out
+        return out
+    finally:
+        con.close()
+
+
+def _enrich_warnings(db_path: Path, template_name: str | None, warnings: list[str]) -> None:
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        dropped = con.execute("SELECT COUNT(*) FROM invoice_dedup_dropped").fetchone()[0]
+        if dropped:
+            warnings.append(
+                f"near_dups_dropped={dropped} (see invoice_dedup_dropped; survivor rule paid>refunded>pending>failed>void)"
+            )
+        if template_name == "revenue_2024":
+            day_first, month_first, amb_touching_2024 = con.execute(
+                """
+                SELECT
+                  ROUND(COALESCE(SUM(CASE
+                    WHEN is_recognized_revenue
+                     AND invoice_date >= DATE '2024-01-01'
+                     AND invoice_date < DATE '2025-01-01'
+                    THEN amount_usd END), 0), 2) AS day_first_usd,
+                  ROUND(COALESCE(SUM(CASE
+                    WHEN is_recognized_revenue
+                     AND invoice_date_month_first >= DATE '2024-01-01'
+                     AND invoice_date_month_first < DATE '2025-01-01'
+                    THEN amount_usd END), 0), 2) AS month_first_usd,
+                  SUM(CASE
+                    WHEN is_recognized_revenue AND invoice_date_ambiguous
+                     AND (
+                       (invoice_date >= DATE '2024-01-01' AND invoice_date < DATE '2025-01-01')
+                       OR (invoice_date_month_first >= DATE '2024-01-01'
+                           AND invoice_date_month_first < DATE '2025-01-01')
+                     )
+                    THEN 1 ELSE 0 END) AS amb_touching_2024
+                FROM invoices
+                """
+            ).fetchone()
+            if day_first != month_first:
+                warnings.append(
+                    f"date_sensitivity: day_first_2024={day_first} vs month_first_2024={month_first} "
+                    f"(ambiguous rows touching 2024={amb_touching_2024})"
+                )
+            else:
+                warnings.append(
+                    f"date_sensitivity: day_first and month_first 2024 totals match ({day_first}); "
+                    f"ambiguous rows touching 2024={amb_touching_2024}"
+                )
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"enrich_warning_failed: {exc}")
     finally:
         con.close()
 
@@ -217,13 +329,17 @@ def _llm_sql(question: str) -> tuple[str | None, list[str]]:
     system = """You write DuckDB SQL for table `invoices` with columns:
 invoice_id, account_id, account_name, contact_email, region, industry, plan,
 billing_cycle, seats, currency, amount, amount_usd, discount_pct, status,
-payment_method, signup_date, invoice_date, churned, csat_score, support_tickets,
+payment_method, signup_date, invoice_date, invoice_date_month_first,
+invoice_date_ambiguous, churned, csat_score, support_tickets,
 list_price_usd, mrr_usd, is_recognized_revenue, raw_plan, raw_status.
+
+Also available: invoice_dedup_dropped (near-dup losers).
 
 Rules:
 - Recognized revenue: is_recognized_revenue OR status IN ('paid','refunded')
-- MRR is mrr_usd (already derived); do not divide annual amounts
-- plan in starter|pro|enterprise; status in paid|pending|failed|refunded|void|unknown
+- Prefer invoice_date (day-first). For sensitivity use invoice_date_month_first.
+- MRR is mrr_usd; do not divide annual amounts
+- Churn by plan: one row per account using latest invoice_date plan
 - Return ONLY a single SELECT or WITH...SELECT. No markdown fences.
 """
     try:
@@ -240,7 +356,7 @@ Rules:
         if not _is_safe_select(text):
             return None, ["LLM SQL failed safety check"]
         return text, warnings
-    except Exception as exc:  # noqa: BLE001 — surface to caller as warning
+    except Exception as exc:  # noqa: BLE001
         return None, [f"LLM error: {exc}"]
 
 
@@ -262,9 +378,11 @@ def ask(question: str, db_path: Path | str = DEFAULT_DB, use_llm: bool = True) -
     sql = ""
     mode = "template"
     blurb = "Query result."
+    template_name: str | None = None
 
     if matched:
-        _name, sql, blurb = matched
+        template_name, sql, blurb, score = matched
+        warnings.append(f"template={template_name} score={score}")
     elif use_llm:
         llm_sql, w = _llm_sql(question)
         warnings.extend(w)
@@ -303,7 +421,6 @@ def ask(question: str, db_path: Path | str = DEFAULT_DB, use_llm: bool = True) -
 
     try:
         rows = execute_sql(db_path, sql)
-        # recount without display cap
         con = duckdb.connect(str(db_path), read_only=True)
         try:
             full = con.execute(sql).fetchall()
@@ -319,6 +436,9 @@ def ask(question: str, db_path: Path | str = DEFAULT_DB, use_llm: bool = True) -
             warnings=warnings + ["exec_error"],
             mode=mode,
         )
+
+    if mode == "template":
+        _enrich_warnings(db_path, template_name, warnings)
 
     return AskResult(
         answer=_format_answer(blurb, rows),

@@ -33,7 +33,9 @@ Implementation must follow this document; do not invent alternate business rules
 | `status` | TEXT | `paid` \| `pending` \| `failed` \| `refunded` \| `void` |
 | `payment_method` | TEXT NULL | Normalized lowercase snake; blank → NULL |
 | `signup_date` | DATE NULL | Parsed; NULL if unparseable |
-| `invoice_date` | DATE NULL | Parsed; NULL if unparseable |
+| `invoice_date` | DATE NULL | Canonical parse; day-first when ambiguous |
+| `invoice_date_month_first` | DATE NULL | Month-first alt (equals canonical when unambiguous) |
+| `invoice_date_ambiguous` | BOOLEAN | True when DD-MM vs MM-DD was ambiguous |
 | `churned` | BOOLEAN | |
 | `csat_score` | DOUBLE NULL | |
 | `support_tickets` | INTEGER | Coalesce null → 0 |
@@ -141,6 +143,7 @@ Unparseable → NULL.
    `paid` (5) > `refunded` (4) > `pending` (3) > `failed` (2) > `void` (1) > `unknown` (0)
 4. Tie-break: latest non-null `invoice_date`, then first remaining row order.
 5. Emit one survivor row per `invoice_id`.
+6. Persist non-survivors in DuckDB table `invoice_dedup_dropped` with `survivor_status` and `drop_reason` for audit.
 
 ## Constraints
 

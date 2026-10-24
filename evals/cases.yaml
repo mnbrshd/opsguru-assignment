@@ -53,16 +53,22 @@
 - id: churn_enterprise_vs_starter
   question: "What's the churn rate among Enterprise accounts vs Starter?"
   sql: |
-    WITH accounts AS (
-      SELECT account_id, plan, MAX(CASE WHEN churned THEN 1 ELSE 0 END) AS is_churned
+    WITH latest AS (
+      SELECT
+        account_id,
+        plan,
+        churned,
+        ROW_NUMBER() OVER (
+          PARTITION BY account_id
+          ORDER BY invoice_date DESC NULLS LAST, invoice_id
+        ) AS rn
       FROM invoices
-      WHERE plan IN ('enterprise', 'starter')
-      GROUP BY account_id, plan
     )
     SELECT
       plan,
-      ROUND(100.0 * SUM(is_churned) / NULLIF(COUNT(*), 0), 2) AS churn_rate_pct
-    FROM accounts
+      ROUND(100.0 * SUM(CASE WHEN churned THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) AS churn_rate_pct
+    FROM latest
+    WHERE rn = 1 AND plan IN ('enterprise', 'starter')
     GROUP BY plan
     ORDER BY plan
   expect:
@@ -70,11 +76,11 @@
     key_column: plan
     value_column: churn_rate_pct
     values:
-      enterprise: 22.22
-      starter: 20.67
+      enterprise: 21.92
+      starter: 18.81
     tolerance_abs: 0.05
   expected_fail: false
-  notes: "Account-level churn; an account on both plans (if any) counted in each."
+  notes: "One account → one plan (latest invoice by invoice_date)."
 
 - id: top5_accounts_revenue
   question: "List the top 5 accounts by revenue, and flag any with CSAT ≤ 2."

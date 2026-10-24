@@ -18,7 +18,16 @@ def _ensure_db(csv_path: Path, db_path: Path, rebuild: bool) -> dict | None:
     if rebuild or not db_path.exists():
         print(f"Building DuckDB from {csv_path} → {db_path}", file=sys.stderr)
         stats = run_pipeline(csv_path, db_path)
-        print(json.dumps({k: stats[k] for k in ("input_rows", "after_exact_dedup", "output_rows", "ambiguous_dates", "unknown_plan", "unknown_status")}, indent=2), file=sys.stderr)
+        keys = (
+            "input_rows",
+            "after_exact_dedup",
+            "output_rows",
+            "near_dups_dropped",
+            "ambiguous_invoice_dates",
+            "unknown_plan",
+            "unknown_status",
+        )
+        print(json.dumps({k: stats[k] for k in keys}, indent=2), file=sys.stderr)
         return stats
     return None
 

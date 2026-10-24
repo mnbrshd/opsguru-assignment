@@ -63,15 +63,15 @@ Optional LLM NL→SQL for off-template questions: copy `.env.example` → `.env`
 
 ## Known limits / failure modes
 
-- Template matcher is keyword-based; paraphrases may miss unless `OPENAI_API_KEY` is set.
-- Day-first date choice can mis-bucket ambiguous rows; on this extract, 2024 totals matched a month-first alternate, but that is **not** a guarantee.
-- Near-dup survivors depend on status priority — a different rule changes revenue.
-- Account-level churn treats each (account, plan) pair; multi-plan history is simplified.
-- Eval case `naive_paid_only_ignores_refunds` is an **expected fail**: counting only `status='paid'` overstates 2024 revenue by ignoring refund nets (~\$28.1M vs ~\$26.3M).
+- **Templates are scored keyword intents** (synonyms + negative weights), not full NLU. Odd paraphrases can still miss without `OPENAI_API_KEY`.
+- **Ambiguous dates** keep day-first as canonical and also store `invoice_date_month_first`. Revenue answers emit a `date_sensitivity` warning comparing both 2024 totals.
+- **Near-dups** still use status priority `paid > refunded > pending > failed > void`; losers land in `invoice_dedup_dropped` (and ask warnings cite the count). A different priority would change revenue.
+- **Churn** is one account → one plan (plan on the latest `invoice_date`). Older plan history is not dual-counted.
+- Eval case `naive_paid_only_ignores_refunds` is an **intentional XFAIL** (not a product bug): paid-only SQL overstates 2024 revenue by ignoring refund nets (~\$28.1M vs ~\$26.3M).
 
 ## Another day
 
-- Better intent routing; parser property tests; near-dup lineage table; thin `POST /ask` API.
+- Embedding/LLM router as default; parser property tests; thin `POST /ask` API.
 
 ## License / data
 

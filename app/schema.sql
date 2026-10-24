@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS invoices (
     payment_method VARCHAR,
     signup_date DATE,
     invoice_date DATE,
+    invoice_date_month_first DATE,
+    invoice_date_ambiguous BOOLEAN,
     churned BOOLEAN,
     csat_score DOUBLE,
     support_tickets INTEGER,
@@ -24,4 +26,15 @@ CREATE TABLE IF NOT EXISTS invoices (
     is_recognized_revenue BOOLEAN,
     raw_plan VARCHAR,
     raw_status VARCHAR
+);
+
+-- Near-duplicate losers (same invoice_id, lower status priority)
+CREATE TABLE IF NOT EXISTS invoice_dedup_dropped (
+    invoice_id VARCHAR,
+    account_id VARCHAR,
+    status VARCHAR,
+    amount_usd DOUBLE,
+    invoice_date DATE,
+    survivor_status VARCHAR,
+    drop_reason VARCHAR
 );
