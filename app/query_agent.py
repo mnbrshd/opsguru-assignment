@@ -308,7 +308,10 @@ def _enrich_warnings(db_path: Path, template_name: str | None, warnings: list[st
         con.close()
 
 
-def _llm_sql(question: str) -> tuple[str | None, list[str]]:
+def _llm_sql(
+    question: str,
+    history: list[dict[str, str]] | None = None,
+) -> tuple[str | None, list[str]]:
     warnings: list[str] = []
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -340,15 +343,22 @@ Rules:
 - Prefer invoice_date (day-first). For sensitivity use invoice_date_month_first.
 - MRR is mrr_usd; do not divide annual amounts
 - Churn by plan: one row per account using latest invoice_date plan
+- Use prior turns only to resolve references (e.g. "that region", "same year")
 - Return ONLY a single SELECT or WITH...SELECT. No markdown fences.
 """
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+    if history:
+        for turn in history[-6:]:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if role in {"user", "assistant"} and content:
+                messages.append({"role": role, "content": content[:2000]})
+    messages.append({"role": "user", "content": question})
+
     try:
         resp = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": question},
-            ],
+            messages=messages,
             temperature=0,
         )
         text = (resp.choices[0].message.content or "").strip()
@@ -367,15 +377,38 @@ def _template_by_name(name: str) -> dict[str, Any] | None:
     return None
 
 
-def ask(question: str, db_path: Path | str = DEFAULT_DB, use_llm: bool = True) -> AskResult:
+def _match_offline(question: str) -> tuple[str, str, str, str, float] | None:
+    """Keyword score, then exemplar token overlap."""
+    matched = _match_template(question)
+    if matched:
+        name, sql, blurb, score = matched
+        return name, sql, blurb, "template", float(score)
+
+    from app.router import offline_example_overlap
+
+    overlapped = offline_example_overlap(question)
+    if overlapped:
+        name, score = overlapped
+        tmpl = _template_by_name(name)
+        if tmpl:
+            return tmpl["name"], tmpl["sql"], tmpl["blurb"], "overlap", score
+    return None
+
+
+def ask(
+    question: str,
+    db_path: Path | str = DEFAULT_DB,
+    use_llm: bool = True,
+    history: list[dict[str, str]] | None = None,
+) -> AskResult:
     """Answer a question.
 
     Default routing when ``use_llm`` and ``OPENAI_API_KEY`` are set:
-      1. Embedding intent router → trusted template SQL
-      2. LLM NL→SQL
-      3. Offline scored keyword templates
+      1. Embedding intent router → trusted template SQL (threshold + margin)
+      2. LLM NL→SQL (uses optional multi-turn ``history``)
+      3. Offline scored templates / exemplar overlap
 
-    Without an API key (or ``use_llm=False``): scored templates only.
+    Without an API key (or ``use_llm=False``): offline templates + overlap.
     """
     db_path = Path(db_path)
     warnings: list[str] = []
@@ -399,34 +432,36 @@ def ask(question: str, db_path: Path | str = DEFAULT_DB, use_llm: bool = True) -
     if use_llm and has_key:
         from app.router import route_by_embedding
 
-        routed = route_by_embedding(question)
-        if routed:
-            name, score = routed
+        name, score, route_warnings = route_by_embedding(question)
+        warnings.extend(route_warnings)
+        if name:
             tmpl = _template_by_name(name)
             if tmpl:
                 template_name, sql, blurb = tmpl["name"], tmpl["sql"], tmpl["blurb"]
                 mode = "embedding"
                 warnings.append(f"embedding_route={name} cosine={score:.3f}")
         if not sql:
-            llm_sql, w = _llm_sql(question)
+            llm_sql, w = _llm_sql(question, history=history)
             warnings.extend(w)
             if llm_sql:
                 sql = llm_sql
                 mode = "llm"
                 blurb = "LLM-generated SQL result."
+                if history:
+                    warnings.append(f"multi_turn_history={len(history)}")
         if not sql:
-            matched = _match_template(question)
-            if matched:
-                template_name, sql, blurb, score = matched
+            offline = _match_offline(question)
+            if offline:
+                template_name, sql, blurb, how, score = offline
                 mode = "template"
-                warnings.append(f"template_fallback={template_name} score={score}")
+                warnings.append(f"template_fallback={template_name} via={how} score={score}")
     else:
-        matched = _match_template(question)
-        if matched:
-            template_name, sql, blurb, score = matched
-            warnings.append(f"template={template_name} score={score}")
+        offline = _match_offline(question)
+        if offline:
+            template_name, sql, blurb, how, score = offline
+            warnings.append(f"template={template_name} via={how} score={score}")
         elif use_llm:
-            llm_sql, w = _llm_sql(question)
+            llm_sql, w = _llm_sql(question, history=history)
             warnings.extend(w)
             if llm_sql:
                 sql = llm_sql

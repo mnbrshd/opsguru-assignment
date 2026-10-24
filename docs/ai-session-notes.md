@@ -53,6 +53,13 @@ Addressed documented limits without gold-plating:
 - Hypothesis property tests on `parse_amount` / `parse_date_pair` (`tests/test_parsers.py`); CI runs pytest
 - Thin FastAPI `POST /ask` (`python -m app.api`)
 
-## Follow-ups for another day
+## Third hardening pass (“another day”)
 
-- API auth; on-disk embedding cache; multi-turn agent
+- API auth via `CLOUDNOVA_API_KEY` (`X-API-Key` / Bearer)
+- On-disk embedding centroid cache + threshold/margin deferral to LLM
+- Multi-turn: REPL history, API `session_id` / `start_session`, LLM history context
+- Offline exemplar token-overlap router to shrink paraphrase misses without a key
+
+## Follow-ups beyond this take-home
+
+- Durable session store; richer agent tools; production auth provider

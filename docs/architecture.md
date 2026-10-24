@@ -1,33 +1,27 @@
 # Architecture
 
-Track B: spec-driven clean/model pipeline + routed NL→SQL ask layer + thin HTTP API.
-
 ```mermaid
 flowchart LR
   rawCsv["data/cloudnova_invoices.csv"] --> clean["app/pipeline.py"]
   spec["specs/cleaned_schema.md"] --> clean
   clean --> duck["data/processed/invoices.duckdb"]
   duck --> ask["app/query_agent.py"]
-  router["app/router.py embeddings"] --> ask
+  router["app/router.py embed + disk cache"] --> ask
   ask --> out["answer + SQL + rows"]
-  ask --> api["POST /ask app/api.py"]
+  ask --> api["POST /ask + API key + sessions"]
   evals["evals/cases.yaml"] --> harness["evals/run_eval.py"]
   duck --> harness
-  tests["tests/test_parsers.py"] --> pytest["pytest"]
+  tests["tests/"] --> pytest["pytest"]
 ```
 
-## Data flow
+## Ask routing
 
-1. **Ingest** — read dirty CSV (~5k rows).
-2. **Clean** — normalize categories, parse amounts & dates (day-first + month-first alt), FX to USD, MRR, dedupe; persist near-dup losers.
-3. **Store** — DuckDB `invoices` (+ `invoice_dedup_dropped`).
-4. **Route / ask** — with API key: embedding intent → LLM SQL → template fallback; offline: scored templates. Execute read-only SQL.
-5. **API** — FastAPI `POST /ask` wraps the same `ask()` function.
-6. **Eval / tests** — fixed SQL cases + Hypothesis property tests on parsers (no live LLM in CI).
+1. **Embedding** (if keyed) — cosine vs cached template centroids; require threshold + margin.
+2. **LLM SQL** — optional multi-turn history from REPL / API session.
+3. **Offline** — keyword scores + exemplar token overlap.
 
 ## Trust boundaries
 
-- Raw CSV is untrusted / dirty.
-- Cleaned table is the only surface the query agent may read.
-- SQL guardrails reject non-SELECT statements on the LLM path.
-- HTTP `question` is length-capped; no auth (local demo only).
+- Cleaned DuckDB is the only query surface.
+- HTTP auth optional via `CLOUDNOVA_API_KEY`.
+- Sessions are process-local memory (demo-grade).

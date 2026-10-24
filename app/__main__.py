@@ -56,7 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.to_dict(), indent=2, default=str))
         return 0 if result.mode != "error" else 1
 
-    print("CloudNova ask (empty line or 'quit' to exit). Templates cover stakeholder questions.", file=sys.stderr)
+    print(
+        "CloudNova ask (empty line or 'quit' to exit). Multi-turn history kept in this REPL.",
+        file=sys.stderr,
+    )
+    history: list[dict[str, str]] = []
     while True:
         try:
             q = input("> ").strip()
@@ -65,8 +69,18 @@ def main(argv: list[str] | None = None) -> int:
             break
         if not q or q.casefold() in {"quit", "exit", "q"}:
             break
-        result = ask(q, db_path=args.db, use_llm=not args.no_llm)
+        if q.casefold() == "/clear":
+            history.clear()
+            print("(history cleared)", file=sys.stderr)
+            continue
+        result = ask(q, db_path=args.db, use_llm=not args.no_llm, history=history or None)
         print(json.dumps(result.to_dict(), indent=2, default=str))
+        if result.mode != "error":
+            history.append({"role": "user", "content": q})
+            history.append(
+                {"role": "assistant", "content": f"{result.answer}\nSQL: {result.sql}"}
+            )
+            history = history[-12:]
     return 0
 
 
