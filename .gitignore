@@ -21,6 +21,8 @@ env/
 .vscode/
 .DS_Store
 Thumbs.db
+.pytest_cache/
+pytest-cache-files-*/
 
 # Data / ML artifacts
 *.parquet

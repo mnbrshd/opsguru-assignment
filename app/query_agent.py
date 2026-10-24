@@ -360,7 +360,23 @@ Rules:
         return None, [f"LLM error: {exc}"]
 
 
+def _template_by_name(name: str) -> dict[str, Any] | None:
+    for t in TEMPLATES:
+        if t["name"] == name:
+            return t
+    return None
+
+
 def ask(question: str, db_path: Path | str = DEFAULT_DB, use_llm: bool = True) -> AskResult:
+    """Answer a question.
+
+    Default routing when ``use_llm`` and ``OPENAI_API_KEY`` are set:
+      1. Embedding intent router → trusted template SQL
+      2. LLM NL→SQL
+      3. Offline scored keyword templates
+
+    Without an API key (or ``use_llm=False``): scored templates only.
+    """
     db_path = Path(db_path)
     warnings: list[str] = []
 
@@ -374,38 +390,59 @@ def ask(question: str, db_path: Path | str = DEFAULT_DB, use_llm: bool = True) -
             mode="error",
         )
 
-    matched = _match_template(question)
     sql = ""
     mode = "template"
     blurb = "Query result."
     template_name: str | None = None
+    has_key = bool(os.getenv("OPENAI_API_KEY"))
 
-    if matched:
-        template_name, sql, blurb, score = matched
-        warnings.append(f"template={template_name} score={score}")
-    elif use_llm:
-        llm_sql, w = _llm_sql(question)
-        warnings.extend(w)
-        if llm_sql:
-            sql = llm_sql
-            mode = "llm"
-            blurb = "LLM-generated SQL result."
-        else:
-            return AskResult(
-                answer="Could not match a known question template and LLM SQL unavailable.",
-                sql="",
-                rows=[],
-                rows_cited=0,
-                warnings=warnings or ["no_match"],
-                mode="error",
-            )
+    if use_llm and has_key:
+        from app.router import route_by_embedding
+
+        routed = route_by_embedding(question)
+        if routed:
+            name, score = routed
+            tmpl = _template_by_name(name)
+            if tmpl:
+                template_name, sql, blurb = tmpl["name"], tmpl["sql"], tmpl["blurb"]
+                mode = "embedding"
+                warnings.append(f"embedding_route={name} cosine={score:.3f}")
+        if not sql:
+            llm_sql, w = _llm_sql(question)
+            warnings.extend(w)
+            if llm_sql:
+                sql = llm_sql
+                mode = "llm"
+                blurb = "LLM-generated SQL result."
+        if not sql:
+            matched = _match_template(question)
+            if matched:
+                template_name, sql, blurb, score = matched
+                mode = "template"
+                warnings.append(f"template_fallback={template_name} score={score}")
     else:
+        matched = _match_template(question)
+        if matched:
+            template_name, sql, blurb, score = matched
+            warnings.append(f"template={template_name} score={score}")
+        elif use_llm:
+            llm_sql, w = _llm_sql(question)
+            warnings.extend(w)
+            if llm_sql:
+                sql = llm_sql
+                mode = "llm"
+                blurb = "LLM-generated SQL result."
+
+    if not sql:
         return AskResult(
-            answer="No template match. Set OPENAI_API_KEY for LLM NL→SQL, or rephrase.",
+            answer=(
+                "Could not route the question. "
+                "Set OPENAI_API_KEY for embedding/LLM routing, or rephrase toward a stakeholder question."
+            ),
             sql="",
             rows=[],
             rows_cited=0,
-            warnings=["no_template_match"],
+            warnings=warnings or ["no_match"],
             mode="error",
         )
 
@@ -437,7 +474,7 @@ def ask(question: str, db_path: Path | str = DEFAULT_DB, use_llm: bool = True) -
             mode=mode,
         )
 
-    if mode == "template":
+    if mode in {"template", "embedding"}:
         _enrich_warnings(db_path, template_name, warnings)
 
     return AskResult(

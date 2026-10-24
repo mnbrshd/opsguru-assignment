@@ -15,5 +15,7 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install -r requirements.txt
+      - name: Property tests (parsers)
+        run: python -m pytest tests/ -q
       - name: Run eval harness
         run: python -m evals.run_eval --rebuild

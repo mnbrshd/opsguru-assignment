@@ -47,8 +47,12 @@ Addressed documented limits without gold-plating:
 - `invoice_dedup_dropped` lineage table
 - Churn = one account / latest-plan grain
 
+## Second hardening pass
+
+- Embedding intent router as default when `OPENAI_API_KEY` is set (`app/router.py`), then LLM SQL, then templates
+- Hypothesis property tests on `parse_amount` / `parse_date_pair` (`tests/test_parsers.py`); CI runs pytest
+- Thin FastAPI `POST /ask` (`python -m app.api`)
+
 ## Follow-ups for another day
 
-- Embedding/LLM router as default
-- Property tests on amount/date parsers
-- Thin `POST /ask` API
+- API auth; on-disk embedding cache; multi-turn agent

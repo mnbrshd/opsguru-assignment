@@ -40,7 +40,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--question", "-q", type=str, help="One-shot natural language question")
     parser.add_argument("--csv", type=Path, default=Path(os.getenv("CLOUDNOVA_CSV", DEFAULT_CSV)))
     parser.add_argument("--db", type=Path, default=Path(os.getenv("CLOUDNOVA_DB", DEFAULT_DB)))
-    parser.add_argument("--no-llm", action="store_true", help="Disable LLM fallback")
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Offline mode: scored templates only (skip embedding router + LLM)",
+    )
     args = parser.parse_args(argv)
 
     _ensure_db(args.csv, args.db, args.rebuild)

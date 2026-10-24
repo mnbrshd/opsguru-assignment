@@ -1,29 +1,34 @@
 # Spec: CLI / Ask Contract
 
-## Entry point
+## Entry points
 
 ```bash
 python -m app                  # ensure DB built, then interactive REPL
 python -m app --rebuild        # force re-run pipeline from CSV
 python -m app --question "..." # one-shot ask, then exit
 python -m app --pipeline-only  # clean + load DuckDB, no ask
+python -m app --no-llm         # force offline scored templates (no embed/LLM)
+
+# Thin HTTP API
+python -m app.api              # POST http://127.0.0.1:8000/ask
 ```
 
 ## Environment
 
 | Var | Required | Purpose |
 |-----|----------|---------|
-| `OPENAI_API_KEY` | No | Enables LLM NL→SQL; without it, template matcher only |
-| `OPENAI_MODEL` | No | Default `gpt-4o-mini` |
+| `OPENAI_API_KEY` | No | Default path: embedding router → LLM SQL → template fallback |
+| `OPENAI_MODEL` | No | Chat model (default `gpt-4o-mini`) |
+| `OPENAI_EMBED_MODEL` | No | Embedding model (default `text-embedding-3-small`) |
+| `OPENAI_EMBED_THRESHOLD` | No | Cosine cutoff (default `0.72`) |
 | `OPENAI_BASE_URL` | No | Optional OpenAI-compatible base URL |
 | `CLOUDNOVA_DB` | No | DuckDB path (default `data/processed/invoices.duckdb`) |
 | `CLOUDNOVA_CSV` | No | Raw CSV path (default `data/cloudnova_invoices.csv`) |
+| `API_HOST` / `API_PORT` | No | Bind for `python -m app.api` |
 
 Secrets live in `.env` (gitignored). Ship `.env.example` only.
 
 ## Ask response shape
-
-Every ask returns a JSON-serializable dict (pretty-printed to stdout):
 
 ```json
 {
@@ -32,23 +37,30 @@ Every ask returns a JSON-serializable dict (pretty-printed to stdout):
   "rows": [ { "...": "..." } ],
   "rows_cited": 12,
   "warnings": ["optional notes"],
-  "mode": "template" | "llm"
+  "mode": "embedding" | "llm" | "template" | "error"
 }
 ```
 
-- `sql` is always shown (assignment: generated query visible).
-- `rows` is the result set (capped at 50 rows in CLI display; full count in `rows_cited`).
-- On failure: non-zero exit, `answer` explains error, `sql` may be empty.
+## Query modes (default order with API key)
 
-## Query modes
+1. **Embedding router** — cosine similarity of the question to exemplar utterances per stakeholder intent; on hit, run that template’s trusted SQL (`mode=embedding`).
+2. **LLM NL→SQL** — if embedding confidence is low; `SELECT`/`WITH` only, safety guardrails.
+3. **Scored templates** — offline keyword/synonym scorer (also the only path without an API key / with `--no-llm`).
 
-1. **Template** — keyword/intent match against the six stakeholder questions in `BUSINESS_CONTEXT.md`. Deterministic SQL. Used by evals and when no API key.
-2. **LLM** — when `OPENAI_API_KEY` is set and template confidence is low: model returns SQL only against table `invoices` with the cleaned schema. Guardrails:
-   - Allow `SELECT` / `WITH` only
-   - Reject `;` multi-statement, `INSERT`/`UPDATE`/`DELETE`/`DROP`/`ATTACH`/`COPY`
-   - Timeout / empty result → clear warning
+Evals and CI use fixed SQL in `evals/cases.yaml` — they do not call the live router.
+
+## HTTP: `POST /ask`
+
+Request:
+
+```json
+{ "question": "...", "use_llm": true }
+```
+
+Response: same ask shape. `422` when routing fails with empty SQL. `GET /health` → `{"status":"ok"}`.
 
 ## Safety
 
 - Never log or commit API keys.
 - Read-only SQL against the local DuckDB file.
+- Request `question` max length 2000.
