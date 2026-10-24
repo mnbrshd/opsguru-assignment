@@ -26,6 +26,7 @@ Thumbs.db
 *.parquet
 *.duckdb
 *.db
+data/processed/
 chroma/
 .chroma/
 faiss_index/
